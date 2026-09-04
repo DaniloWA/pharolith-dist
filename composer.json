@@ -1,0 +1,25 @@
+{
+  "name": "pharolith/harness",
+  "description": "Local coordination for humans and coding agents. Thin wrapper around the native Pharolith binary.",
+  "type": "library",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "pharolith",
+    "agents",
+    "coordination"
+  ],
+  "require": {
+    "php": ">=8.1"
+  },
+  "bin": [
+    "bin/pharolith",
+    "bin/pharolith-mcp-host"
+  ],
+  "config": {
+    "sort-packages": true
+  },
+  "support": {
+    "issues": "https://github.com/DaniloWA/pharolith-dist/issues",
+    "source": "https://github.com/DaniloWA/pharolith-dist"
+  }
+}

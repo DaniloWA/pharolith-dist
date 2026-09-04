@@ -1,0 +1,139 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * Composer entry point (plan §9).
+ *
+ * The wrapper carries no coordination logic: it resolves the native Pharolith
+ * binary, executes it, forwards stdio, and propagates the exit code. It never
+ * requires Node.
+ */
+
+const PHAROLITH_BINARY_NAME = PHP_OS_FAMILY === 'Windows' ? 'pharolith.exe' : 'pharolith';
+
+/** Platform triple used by bundled builds. */
+function pharolith_target(): string
+{
+    $os = match (PHP_OS_FAMILY) {
+        'Windows' => 'win32',
+        'Darwin' => 'darwin',
+        default => 'linux',
+    };
+    $machine = strtolower(php_uname('m'));
+    $arch = match (true) {
+        str_contains($machine, 'arm64'), str_contains($machine, 'aarch64') => 'arm64',
+        str_contains($machine, '64') => 'x64',
+        default => $machine,
+    };
+
+    return $os . '-' . $arch;
+}
+
+/** A Composer bin shim would make the wrapper call itself. */
+function pharolith_is_shim(string $candidate): bool
+{
+    $parts = preg_split('#[\\\\/]#', str_replace('\\', '/', dirname(realpath($candidate) ?: $candidate)));
+
+    return in_array('bin', $parts, true) && in_array('vendor', $parts, true);
+}
+
+/**
+ * A binary the project installed for itself, by any means: the Pharolith
+ * bridge and the npm wrapper look in the same places, so a PHP project that
+ * obtained the binary through any channel still works.
+ */
+function pharolith_from_project(): ?string
+{
+    $directory = getcwd();
+    if ($directory === false) {
+        return null;
+    }
+    while (true) {
+        foreach ([
+            $directory . '/.pharolith/bin/' . PHAROLITH_BINARY_NAME,
+            $directory . '/node_modules/@pharolith-ai/harness-' . pharolith_target()
+                . '/bin/' . PHAROLITH_BINARY_NAME,
+        ] as $candidate) {
+            if (is_file($candidate)) {
+                return $candidate;
+            }
+        }
+        $parent = dirname($directory);
+        if ($parent === $directory) {
+            return null;
+        }
+        $directory = $parent;
+    }
+}
+
+function pharolith_from_path(): ?string
+{
+    $entries = explode(PATH_SEPARATOR, (string) getenv('PATH'));
+    $suffixes = PHP_OS_FAMILY === 'Windows' ? ['.exe', '.cmd', '.bat', ''] : [''];
+    foreach ($entries as $entry) {
+        if ($entry === '') {
+            continue;
+        }
+        foreach ($suffixes as $suffix) {
+            $candidate = rtrim($entry, '\\/') . DIRECTORY_SEPARATOR . 'pharolith' . $suffix;
+            if (is_file($candidate) && !pharolith_is_shim($candidate)) {
+                return $candidate;
+            }
+        }
+    }
+
+    return null;
+}
+
+/** Most explicit source first; a missing binary is reported, never ignored. */
+function pharolith_resolve(string $packageRoot): string
+{
+    $configured = getenv('PHAROLITH_BINARY');
+    if (is_string($configured) && $configured !== '') {
+        if (!is_file($configured)) {
+            fwrite(STDERR, "pharolith: PHAROLITH_BINARY is set to {$configured}, which is not a file.\n");
+            exit(127);
+        }
+
+        return $configured;
+    }
+
+    $bundled = $packageRoot . '/vendor-bin/' . pharolith_target() . '/' . PHAROLITH_BINARY_NAME;
+    if (is_file($bundled)) {
+        return $bundled;
+    }
+
+    $project = pharolith_from_project();
+    if ($project !== null) {
+        return $project;
+    }
+
+    $found = pharolith_from_path();
+    if ($found !== null) {
+        return $found;
+    }
+
+    $target = pharolith_target();
+    fwrite(STDERR, "pharolith: no Pharolith binary for {$target}. Looked at: PHAROLITH_BINARY, "
+        . "the bundled vendor-bin directory, .pharolith/bin, node_modules, and PATH. "
+        . "Install a platform build or set PHAROLITH_BINARY to one.\n");
+    exit(127);
+}
+
+$binary = pharolith_resolve(dirname(__DIR__));
+$arguments = array_slice($argv, 1);
+
+$process = proc_open(
+    array_merge([$binary], $arguments),
+    [0 => STDIN, 1 => STDOUT, 2 => STDERR],
+    $pipes
+);
+
+if (!is_resource($process)) {
+    fwrite(STDERR, "pharolith: cannot run {$binary}\n");
+    exit(126);
+}
+
+exit(proc_close($process));
