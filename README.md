@@ -8,6 +8,7 @@ scripts or runtime downloads. `SHA256SUMS` records every native executable.
 
 ```bash
 composer require --dev pharolith/harness
+vendor/bin/pharolith init
 vendor/bin/pharolith status
 ```
 
@@ -28,6 +29,24 @@ self-checks it, configures all supported clients using absolute path, and
 verifies results. It is explicit and idempotent. Preview with
 `vendor/bin/pharolith setup --dry-run`. Full fallback manual:
 [MCP_SETUP.md](MCP_SETUP.md).
+
+## Completion quality
+
+The native harness preserves each new write task's acceptance outcomes, maps
+them to implementation and recorded gates, and refuses completion with missing,
+failed, stale or modified evidence. CLI, MCP and stop hooks use the same checks.
+Canonical skills and their focused references install with the package.
+
+```bash
+vendor/bin/pharolith quality show <task> --json
+vendor/bin/pharolith quality set <task> --file contract.json
+vendor/bin/pharolith quality scan <task>
+vendor/bin/pharolith verify <task>
+```
+
+UI tasks also require product/state contracts and actual rendered review material.
+`quality review` records reviewer-supplied evidence with integrity and freshness;
+agents still render, interact and assess the interface.
 
 ## Binary resolution
 
