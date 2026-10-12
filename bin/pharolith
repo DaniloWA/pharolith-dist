@@ -6,9 +6,9 @@ declare(strict_types=1);
 /**
  * Composer entry point (plan §9).
  *
- * The wrapper carries no coordination logic: it resolves the native Pharolith
- * binary, executes it, forwards stdio, and propagates the exit code. It never
- * requires Node.
+ * It resolves and runs the native binary, forwards stdio, and completes the
+ * package-manager step of a verified update after the core stages its journal.
+ * It never requires Node.
  */
 
 const PHAROLITH_BINARY_NAME = PHP_OS_FAMILY === 'Windows' ? 'pharolith.exe' : 'pharolith';
@@ -122,7 +122,187 @@ function pharolith_resolve(string $packageRoot): string
     exit(127);
 }
 
+function pharolith_same_distribution_binary(string $packageRoot, string $binary): bool
+{
+    $candidate = $packageRoot . '/vendor-bin/' . pharolith_target() . DIRECTORY_SEPARATOR
+        . PHAROLITH_BINARY_NAME;
+    $expected = realpath($candidate);
+    $actual = realpath($binary);
+    return $expected !== false && $actual !== false && $expected === $actual;
+}
+
+function pharolith_installed_version(string $packageRoot): ?string
+{
+    $vendor = dirname(dirname($packageRoot));
+    $installed = $vendor . '/composer/installed.json';
+    if (!is_file($installed)) {
+        return null;
+    }
+    $document = json_decode((string) file_get_contents($installed), true);
+    $packages = is_array($document['packages'] ?? null) ? $document['packages'] : $document;
+    if (!is_array($packages)) {
+        return null;
+    }
+    foreach ($packages as $package) {
+        if (($package['name'] ?? null) === 'pharolith/harness') {
+            $version = $package['pretty_version'] ?? $package['version'] ?? null;
+            return is_string($version) ? ltrim($version, 'v') : null;
+        }
+    }
+
+    return null;
+}
+
+function pharolith_pending_update(): ?array
+{
+    $directory = getcwd();
+    if ($directory === false) {
+        return null;
+    }
+    while (true) {
+        $pending = $directory . '/.pharolith/upgrade-pending.json';
+        if (is_file($pending)) {
+            $document = json_decode((string) file_get_contents($pending), true);
+            return is_array($document) ? ['root' => $directory, 'path' => $pending, 'request' => $document] : null;
+        }
+        $parent = dirname($directory);
+        if ($parent === $directory) {
+            return null;
+        }
+        $directory = $parent;
+    }
+}
+
+function pharolith_run_binary(string $binary, array $arguments, ?array $environment = null): int
+{
+    $process = proc_open(
+        array_merge([$binary], $arguments),
+        [0 => STDIN, 1 => STDOUT, 2 => STDERR],
+        $pipes,
+        null,
+        $environment
+    );
+    if (!is_resource($process)) {
+        return 126;
+    }
+    return proc_close($process);
+}
+
+function pharolith_package_environment(string $binary, string $version): array
+{
+    $environment = getenv();
+    if (!is_array($environment)) {
+        $environment = [];
+    }
+    $environment['PHAROLITH_PACKAGE_VERSION'] = $version;
+    $environment['PHAROLITH_INSTALL_BINARY'] = $binary;
+    return $environment;
+}
+
+function pharolith_composer_install(string $version): bool
+{
+    if (!preg_match('/^\d+\.\d+\.\d+$/', $version)) {
+        fwrite(STDERR, "pharolith: refusing invalid stable version {$version}\n");
+        return false;
+    }
+    $command = 'composer global require pharolith/harness:' . $version
+        . ' --no-interaction --no-progress --no-scripts';
+    $process = proc_open($command, [0 => STDIN, 1 => STDOUT, 2 => STDERR], $pipes);
+    return is_resource($process) && proc_close($process) === 0;
+}
+
+function pharolith_verify_composer_binary(string $packageRoot, string $binary): bool
+{
+    $checksums = $packageRoot . '/SHA256SUMS';
+    $realRoot = realpath($packageRoot);
+    $realBinary = realpath($binary);
+    if (!is_file($checksums) || $realRoot === false || $realBinary === false
+        || !str_starts_with($realBinary, $realRoot . DIRECTORY_SEPARATOR)) {
+        return false;
+    }
+    $relative = str_replace('\\', '/', substr($realBinary, strlen($realRoot) + 1));
+    foreach (file($checksums, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+        if (preg_match('/^([a-fA-F0-9]{64})\s+\*?(.+)$/', trim($line), $match)
+            && $match[2] === $relative) {
+            return strtolower($match[1]) === strtolower((string) hash_file('sha256', $realBinary));
+        }
+    }
+    return false;
+}
+
+function pharolith_apply_pending_update(array $arguments, string $oldBinary, string $packageRoot): ?int
+{
+    if (($arguments[0] ?? null) !== 'upgrade'
+        || (!in_array('--apply', $arguments, true) && !in_array('--auto', $arguments, true))) {
+        return null;
+    }
+    $pending = pharolith_pending_update();
+    if ($pending === null) {
+        return null;
+    }
+    $request = $pending['request'];
+    $id = (string) ($request['id'] ?? '');
+    $oldVersion = (string) ($request['installed_version'] ?? '');
+    $version = (string) ($request['candidate_version'] ?? '');
+    if ($id === '' || $oldVersion === '' || $version === '') {
+        fwrite(STDERR, "pharolith: invalid update handoff; snapshot kept at {$pending['path']}\n");
+        return 1;
+    }
+
+    $packageUpdated = false;
+    try {
+        if (!pharolith_composer_install($version)) {
+            throw new RuntimeException('Composer could not install the requested release');
+        }
+        $packageUpdated = true;
+        $candidate = pharolith_resolve($packageRoot);
+        if (!pharolith_verify_composer_binary($packageRoot, $candidate)) {
+            throw new RuntimeException('installed binary does not match SHA256SUMS');
+        }
+        $status = pharolith_run_binary(
+            $candidate,
+            ['upgrade', '--resume', $id],
+            pharolith_package_environment($candidate, $version)
+        );
+        if ($status === 0) {
+            return 0;
+        }
+        if (!pharolith_composer_install($oldVersion)) {
+            fwrite(STDERR, "pharolith: Composer could not restore release {$oldVersion}; project snapshot remains available\n");
+            return $status;
+        }
+        $restored = pharolith_resolve($packageRoot);
+        pharolith_run_binary(
+            $restored,
+            ['upgrade', '--rollback', $id],
+            pharolith_package_environment($restored, $oldVersion)
+        );
+        return $status;
+    } catch (Throwable $error) {
+        if ($packageUpdated && !pharolith_composer_install($oldVersion)) {
+            fwrite(STDERR, "pharolith: Composer package rollback failed\n");
+        }
+        $restored = $packageUpdated ? pharolith_resolve($packageRoot) : $oldBinary;
+        pharolith_run_binary(
+            $restored,
+            ['upgrade', '--rollback', $id],
+            pharolith_package_environment($restored, $oldVersion)
+        );
+        fwrite(STDERR, "pharolith: update deferred; recovery snapshot {$id}: {$error->getMessage()}\n");
+        return 1;
+    }
+}
+
 $binary = pharolith_resolve(dirname(__DIR__));
+$packageRoot = dirname(__DIR__);
+$managedBinary = (getenv('PHAROLITH_BINARY') ?: '') === ''
+    && pharolith_same_distribution_binary($packageRoot, $binary);
+putenv('PHAROLITH_INSTALL_CHANNEL=' . ($managedBinary ? 'composer' : 'unsupported'));
+putenv('PHAROLITH_INSTALL_PACKAGE_ROOT=' . $packageRoot);
+putenv('PHAROLITH_INSTALL_BINARY=' . $binary);
+putenv('PHAROLITH_PACKAGE_VERSION=' . (pharolith_installed_version($packageRoot) ?? ''));
+putenv('PHAROLITH_INSTALL_EXECUTABLE=' . PHP_BINARY);
+putenv('PHAROLITH_INSTALL_WRAPPER=' . __FILE__);
 $arguments = array_slice($argv, 1);
 
 $process = proc_open(
@@ -136,4 +316,8 @@ if (!is_resource($process)) {
     exit(126);
 }
 
-exit(proc_close($process));
+$status = proc_close($process);
+if ($status === 0) {
+    $status = pharolith_apply_pending_update($arguments, $binary, $packageRoot) ?? $status;
+}
+exit($status);

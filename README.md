@@ -1,68 +1,56 @@
-# pharolith/harness
+# `pharolith/harness`
 
-Thin Composer wrapper around the native Pharolith binary.
+Thin Composer wrapper around Pharolith's native CLI and MCP bridge. PHP scripts
+resolve a bundled native executable, forward stdio and propagate its status;
+coordination remains in the Rust binary.
 
-This public package is generated from a single source release. It carries the
-CLI and MCP bridge for every supported platform; installation performs no
-scripts or runtime downloads. `SHA256SUMS` records every native executable.
+## Requirements and install
 
-```bash
-composer require --dev pharolith/harness
-vendor/bin/pharolith init
-vendor/bin/pharolith status
-```
-
-The wrapper holds no coordination logic. It resolves the platform binary,
-runs it, forwards stdio, and propagates the exit code.
-
-## MCP setup
-
-Package includes bridge and automatic setup for Codex, Claude Code and Cursor:
+PHP 8.1 or newer with `proc_open` available. The generated public distribution
+contains CLI and bridge pairs for all supported targets plus `SHA256SUMS`; it
+does not require Node, run install scripts or download a runtime at execution.
 
 ```bash
 composer require --dev pharolith/harness
 vendor/bin/pharolith setup
+vendor/bin/pharolith init
+vendor/bin/pharolith status
 ```
 
-Setup works before project initialization, copies bridge to stable user path,
-self-checks it, configures all supported clients using absolute path, and
-verifies results. It is explicit and idempotent. Preview with
-`vendor/bin/pharolith setup --dry-run`. Full fallback manual:
-[MCP_SETUP.md](MCP_SETUP.md).
+Run `setup` once per machine to configure Codex, Claude Code and Cursor. Preview
+with `vendor/bin/pharolith setup --dry-run`. Run `init` per invited project.
+Setup is explicit and idempotent; it preserves unrelated client settings and
+reports reload requirements.
 
-## Completion quality
+## Resolution and bridge
 
-The native harness preserves each new write task's acceptance outcomes, maps
-them to implementation and recorded gates, and refuses completion with missing,
-failed, stale or modified evidence. CLI, MCP and stop hooks use the same checks.
-Canonical skills and their focused references install with the package.
+The Composer CLI wrapper resolves its explicit `PHAROLITH_BINARY` override and
+the generated platform-native locations before compatible `PATH` entries,
+ignoring Composer's own `vendor/bin` shim. The Composer bridge launcher also
+accepts the override, then resolves its native pair. The standalone native host
+applies its own root and executable precedence; use setup self-check output when
+debugging a mismatch.
+
+Missing resolution exits 127; execution failure exits 126; signal termination
+exits 128; otherwise the native child's exit status is returned.
+
+## MCP and quality
 
 ```bash
+vendor/bin/pharolith mcp
+vendor/bin/pharolith agent-boot --json
 vendor/bin/pharolith quality show <task> --json
-vendor/bin/pharolith quality set <task> --file contract.json
-vendor/bin/pharolith quality scan <task>
 vendor/bin/pharolith verify <task>
 ```
 
-UI tasks also require product/state contracts and actual rendered review material.
-`quality review` records reviewer-supplied evidence with integrity and freshness;
-agents still render, interact and assess the interface.
+The native harness provides scoped leases, handoff, source-bound validation,
+canonical skills, ADR/docs gates and UI review contracts. Rendered UI evidence
+is reviewer-supplied and freshness-checked; the wrapper does not operate a
+browser or claim visual quality by itself.
 
-## Binary resolution
+## Source versus public release
 
-In order:
-
-1. `PHAROLITH_BINARY` — an explicit path, which wins over everything.
-2. `vendor-bin/<platform>-<arch>/pharolith` bundled inside this package.
-3. `.pharolith/bin/pharolith`, or an npm platform package, in this project or a
-   parent. These remain compatibility fallbacks; the published Composer package
-   always includes its own native builds.
-4. `pharolith` on `PATH`, ignoring Composer's own `vendor/bin` shims so the
-   wrapper can never call itself.
-
-If none of those exist the wrapper exits `127` and says what it looked for.
-
-## PHP only
-
-This package requires PHP 8.1 and nothing else. It does not require Node, and
-it resolves the same native binary the npm wrapper uses.
+This directory is the Composer source template. The public generated repository
+contains the six platform CLI/bridge pairs and checksums described by
+`docs/contracts/public-distribution.md`. Source release version is 0.15.0;
+published registry availability must be checked separately.
